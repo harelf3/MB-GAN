@@ -1,16 +1,24 @@
-## Train a MB-GAN based on custom microbiome CSV data
+## Resume training from a saved MB-GAN checkpoint
 from model import MBGAN
 from scipy.stats import describe
 from utils import *
 import pandas as pd
 import numpy as np
+import os
+from tensorflow.keras.models import load_model
 
 NAME = "mbgan_custom"
 EXP_DIR = "custom_microbiome"
 CSV_FILE = "./course_data/microbiome_relative_abundance.csv"
-ITERS = 50000  # Increased iterations for longer training
+
+# Resume settings
+RESUME_FROM_ITER = 10000  # Which iteration to resume from
+ADDITIONAL_ITERS = 10000  # How many more iterations to train
 BATCH_SIZE = 32
 SAVE_INTERVAL = 1000
+
+# Path to your existing models
+EXISTING_MODEL_DIR = "custom_microbiome/mbgan_custom_20250816T162315/models"
 
 
 def get_save_fn(taxa_list):
@@ -24,8 +32,10 @@ def get_save_fn(taxa_list):
         print("sparsity: %s" % str(describe(sparsity)))
         print("entropy: %s" % str(describe(entropy)))
         
+        # Adjust epoch number to continue from where we left off
+        actual_epoch = RESUME_FROM_ITER + epoch
         filename = "{:s}_{:06d}--{:.4f}--{:.4f}.csv".format(
-            model.model_name, epoch, np.mean(sparsity), np.mean(entropy))
+            model.model_name, actual_epoch, np.mean(sparsity), np.mean(entropy))
         
         pd.DataFrame(res, columns=taxa_list).to_csv(os.path.join(table_dir, filename))
         
@@ -67,7 +77,9 @@ def create_phylo_matrix(taxa_list):
     return adj_matrix, taxa_indices
 
 
-if __name__ == '__main__':
+def resume_training_from_checkpoint():
+    """Resume training from saved model checkpoint"""
+    
     # Load the custom CSV dataset
     print("Loading custom CSV data...")
     data_array, taxa_list = load_custom_csv_data(CSV_FILE)
@@ -77,7 +89,7 @@ if __name__ == '__main__':
     adj_matrix, taxa_indices = create_phylo_matrix(taxa_list)
     tf_matrix = adjmatrix_to_dense(adj_matrix, shape=(len(taxa_list), len(taxa_indices)))
     
-    # Model configuration
+    # Model configuration (same as original)
     model_config = {
         'ntaxa': len(taxa_list),  # Use actual number of taxa
         'latent_dim': 100,
@@ -92,17 +104,53 @@ if __name__ == '__main__':
                    'optimizer': ('RMSprop', {}), 'lr': 0.00005},
     }
     
-    # Train the model
-    print("Starting MB-GAN training...")
-    print(f"Training samples: {data_array.shape[0]}")
-    print(f"Number of taxa: {len(taxa_list)}")
-    print(f"Training iterations: {ITERS}")
-    print(f"Batch size: {BATCH_SIZE}")
+    # Create new MB-GAN instance
+    print(f"Creating MB-GAN model...")
+    mbgan = MBGAN(NAME + "_resumed", model_config, train_config)
     
-    mbgan = MBGAN(NAME, model_config, train_config)
-    mbgan.train(data_array, iteration=ITERS, batch_size=BATCH_SIZE, 
+    # Build the model first by calling train with 0 iterations
+    print("Initializing model architecture...")
+    mbgan.train(data_array, iteration=0, batch_size=BATCH_SIZE, 
+                n_critic=5, n_generator=1, save_fn=None, 
+                save_interval=SAVE_INTERVAL, experiment_dir=EXP_DIR,
+                pre_processor=None, verbose=0)
+    
+    # Load the saved weights
+    generator_path = os.path.join(EXISTING_MODEL_DIR, f"mbgan_custom_{RESUME_FROM_ITER:06d}_generator.h5")
+    critic_path = os.path.join(EXISTING_MODEL_DIR, f"mbgan_custom_{RESUME_FROM_ITER:06d}_critic.h5")
+    
+    print(f"Loading generator weights from: {generator_path}")
+    print(f"Loading critic weights from: {critic_path}")
+    
+    if os.path.exists(generator_path) and os.path.exists(critic_path):
+            # Load the models directly
+        loaded_generator = load_model(generator_path)
+        loaded_critic = load_model(critic_path)
+        
+        # Copy the weights
+        mbgan.generator.set_weights(loaded_generator.get_weights())
+        mbgan.critic.set_weights(loaded_critic.get_weights())
+        print(f"Successfully loaded model weights from iteration {RESUME_FROM_ITER}")
+    else:
+        print("Error: Could not find saved model files!")
+        print(f"Looking for:")
+        print(f"  - {generator_path}")
+        print(f"  - {critic_path}")
+        return
+    
+    # Continue training
+    print(f"Resuming training from iteration {RESUME_FROM_ITER}...")
+    print(f"Training for {ADDITIONAL_ITERS} more iterations")
+    print(f"Total final iterations will be: {RESUME_FROM_ITER + ADDITIONAL_ITERS}")
+    
+    # Continue training
+    mbgan.train(data_array, iteration=ADDITIONAL_ITERS, batch_size=BATCH_SIZE, 
                 n_critic=5, n_generator=1, save_fn=get_save_fn(taxa_list), 
                 save_interval=SAVE_INTERVAL, experiment_dir=EXP_DIR,
                 pre_processor=None, verbose=0)
     
-    print("Training completed!")
+    print("Resumed training completed!")
+
+
+if __name__ == '__main__':
+    resume_training_from_checkpoint()
